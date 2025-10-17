@@ -1,0 +1,3 @@
+[submodule "catty-reminders-app"]
+	path = catty-reminders-app
+	url = https://github.com/Nakamo312/catty-reminders-app
