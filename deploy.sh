@@ -1,36 +1,20 @@
 #!/bin/bash
+echo "🚀 Запуск деплоя Catty Reminders App"
 
-echo "🚀 Начинаем развертывание демо-сайта..."
+echo "⏹️  Остановка службы..."
+sudo systemctl stop catty-reminders
 
-# Проверяем, установлен ли nginx
-if ! command -v nginx &> /dev/null; then
-    echo "❌ nginx не установлен."
-    exit 1
+echo "📦 Установка зависимостей..."
+if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
 fi
 
-# Создаем директорию для сайта
-sudo mkdir -p /var/www/demo
+pip3 install -r requirements.txt
 
-# Копируем файлы
-echo "📁 Копируем файлы сайта..."
-sudo cp index.html /var/www/demo/
+echo "▶️  Запуск службы..."
+sudo systemctl start catty-reminders
 
-# Копируем конфигурацию nginx
-echo "⚙️  Применяем конфигурацию nginx..."
-sudo cp nginx.conf /etc/nginx/sites-available/demo-site
-sudo ln -sf /etc/nginx/sites-available/demo-site /etc/nginx/sites-enabled/
+sleep 2
+sudo systemctl status catty-reminders --no-pager
 
-# Проверяем конфигурацию
-echo "🔍 Проверяем конфигурацию nginx..."
-sudo nginx -t
-
-if [ $? -eq 0 ]; then
-    # Перезапускаем nginx
-    echo "🔄 Перезапускаем nginx..."
-    sudo systemctl reload nginx
-    
-    echo "✅ Развертывание завершено успешно!"
-else
-    echo "❌ Ошибка в конфигурации nginx"
-    exit 1
-fi
+echo "✅ Деплой завершен"

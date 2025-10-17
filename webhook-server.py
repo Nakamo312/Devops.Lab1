@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Простой webhook сервер для демонстрации Git автоматизации
-Показывает как Git события могут запускать автоматические процессы
-"""
-
 import tempfile
 import subprocess
 import os
@@ -13,39 +8,41 @@ import hmac
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import sys
+import requests
 
-# Конфигурация
 PORT = 8080
-
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')  
+APP_ID = os.getenv('ID', 'localhost')  # ← здесь
+PROXY_DOMAIN = os.getenv('PROXY', 'local')  # ← здесь
+TOKEN = os.getenv('TOKEN', 'local') 
 class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
-        """Обработка POST запросов от GitHub"""
-
-        # Получаем размер данных
-        content_length = int(self.headers.get('Content-Length', 0))
-
-        # Читаем данные
-        body = self.rfile.read(content_length)
-
-        # Парсим JSON
         try:
-            payload = json.loads(body.decode('utf-8'))
-            self._process_webhook(payload)
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
 
-            # Отвечаем успехом
+            try:
+                payload = json.loads(body.decode('utf-8'))
+                self._process_webhook(payload)
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"status": "success"}')
+
+            except json.JSONDecodeError:
+                print("❌ Ошибка парсинга JSON")
+                self.send_response(400)
+                self.end_headers()
+                
+        except BrokenPipeError:
+            print("   ℹ️  Клиент закрыл соединение до отправки ответа")
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"status": "success"}')
-
-        except json.JSONDecodeError:
-            print("❌ Ошибка парсинга JSON")
-            self.send_response(400)
-            self.end_headers()
+        except Exception as e:
+            print(f"   ❌ Ошибка в обработке запроса: {e}")
 
     def do_GET(self):
-        """Простая страница статуса"""
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -70,20 +67,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     <p><strong>Статус:</strong> Сервер активен и ожидает webhook события от GitHub</p>
                     <p><strong>Время запуска:</strong> {time}</p>
                     <p><strong>Порт:</strong> {port}</p>
+                    <p><strong>GitHub Status:</strong> {github_status}</p>
                 </div>
                 <p>Этот сервер демонстрирует как Git события могут автоматически запускать процессы.</p>
                 <p>Каждый push, pull request или release будет логироваться в консоли сервера.</p>
             </div>
         </body>
         </html>
-        """.format(time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), port=PORT)
+        """.format(
+            time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+            port=PORT,
+            github_status="✅ Включено" if GITHUB_TOKEN else "❌ Выключено (нет GITHUB_TOKEN)"
+        )
 
         self.wfile.write(html.encode('utf-8'))
 
     def _process_webhook(self, payload):
-        """Обработка webhook события"""
-
-        # Получаем информацию о событии
         event_type = self.headers.get('X-GitHub-Event', 'unknown')
         repo_name = payload.get('repository', {}).get('full_name', 'unknown')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -93,7 +92,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         print(f"   Тип события: {event_type}")
         print(f"   Репозиторий: {repo_name}")
 
-        # Обрабатываем разные типы событий
         if event_type == 'push':
             self._handle_push_event(payload)
         elif event_type == 'pull_request':
@@ -103,8 +101,42 @@ class WebhookHandler(BaseHTTPRequestHandler):
         else:
             print(f"   ℹ️  Событие '{event_type}' - базовое логирование")
 
+    def _update_github_status(self, payload, state, description, context="ci/catty-reminders"):
+        """Обновляет статус коммита в GitHub"""
+        if not GITHUB_TOKEN:
+            return
+
+        try:
+            repo_full_name = payload.get('repository', {}).get('full_name')
+            commit_sha = payload.get('after') or payload.get('pull_request', {}).get('head', {}).get('sha')
+            
+            if not repo_full_name or not commit_sha:
+                return
+
+            url = f"https://api.github.com/repos/{repo_full_name}/statuses/{commit_sha}"
+            
+            headers = {
+                'Authorization': f'token {GITHUB_TOKEN}',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+            
+            data = {
+                "state": state,
+                "target_url": f"http://app.{APP_ID}.{PROXY_DOMAIN}:8080",
+                "description": description,
+                "context": context
+            }
+            
+            response = requests.post(url, headers=headers, json=data)
+            if response.status_code == 201:
+                print(f"   📊 GitHub Status: {state} - {description}")
+            else:
+                print(f"   ❌ Ошибка обновления статуса: {response.status_code}")
+                
+        except Exception as e:
+            print(f"   ❌ Ошибка отправки статуса в GitHub: {e}")
+
     def _handle_push_event(self, payload):
-        """Обработка push события"""
         commits = payload.get('commits', [])
         branch = payload.get('ref', '').replace('refs/heads/', '')
         pusher = payload.get('pusher', {}).get('name', 'unknown')
@@ -114,58 +146,94 @@ class WebhookHandler(BaseHTTPRequestHandler):
         print(f"   👤 Автор: {pusher}")
         print(f"   📊 Коммитов: {len(commits)}")
 
-        # Имитируем автоматические действия
+        # Обновляем статус в GitHub - начали обработку
+        self._update_github_status(payload, "pending", "Запуск автоматизации...")
+
         print(f"   🚀 ЗАПУСКАЕМ АВТОМАТИЗАЦИЮ:")
-        print(f"      - Запуск тестов для ветки {branch}")
-        print(f"      - Проверка качества кода")
+        
+        working_dir = "/home/v1k70r/tmp/catty-reminders-app"
+        
+        try:
+            if not os.path.exists(working_dir):
+                print(f"      ❌ Рабочая директория не найдена: {working_dir}")
+                self._update_github_status(payload, "error", "Рабочая директория не найдена")
+                return
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            print(f"Временная директория: {tmpdir}")
+            print(f"      Рабочая директория: {working_dir}")
 
-            # Выполняем git clone
-            subprocess.run(
-                ["git", "clone", clone_url, tmpdir],
-                check=True
+            print(f"      - Получение изменений из ветки {branch}...")
+            pull_result = subprocess.run(
+                ["git", "pull", "origin", branch],
+                cwd=working_dir,
+                capture_output=True,
+                text=True
             )
+            
+            if pull_result.returncode == 0:
+                print(f"      ✅ Изменения получены успешно!")
+                if pull_result.stdout.strip():
+                    print(f"         {pull_result.stdout.strip()}")
+            else:
+                print(f"      ❌ Ошибка при получении изменений!")
+                print(f"         {pull_result.stderr if pull_result.stderr else pull_result.stdout}")
+                self._update_github_status(payload, "error", "Ошибка при получении изменений")
+                return
 
-            subprocess.run(
-                ["git", "checkout", branch],
-                cwd=tmpdir,
-                check=True
+            # Обновляем статус - запускаем тесты
+            self._update_github_status(payload, "pending", "Запуск тестов...")
+
+            print(f"      - Запуск тестов на обновленном коде...")
+            test_result = subprocess.run(
+                ["./test.sh"],
+                cwd=working_dir,
+                capture_output=True,
+                text=True
             )
+            
+            if test_result.returncode == 0:
+                print(f"      ✅ Тесты прошли успешно!")
+                if test_result.stdout.strip():
+                    print(f"         {test_result.stdout.strip()}")
+                
+                # Обновляем статус - тесты прошли, запускаем деплой
+                self._update_github_status(payload, "pending", "Запуск деплоя...")
 
-            # Запускаем тесты перед деплоем
-            print(f"      - Запуск тестов...")
-            try:
-                result = subprocess.run(
-                    ["./test.sh"],
-                    cwd=tmpdir,
-                    check=True,
+                print(f"      - Запуск деплоя...")
+                deploy_result = subprocess.run(
+                    ["./deploy.sh"],
+                    cwd=os.getcwd(),
                     capture_output=True,
                     text=True
                 )
-                print(f"      ✅ Тесты прошли успешно!")
-                print(f"         {result.stdout.strip()}")
+                
+                if deploy_result.returncode == 0:
+                    print(f"      ✅ Деплой завершен успешно!")
+                    if deploy_result.stdout.strip():
+                        print(f"         {deploy_result.stdout.strip()}")
+                    
+                    # Финальный успешный статус
+                    self._update_github_status(payload, "success", "Автоматизация завершена успешно")
+                    
+                    print(f"   🎉 Автоматизация завершена!")
+                    print(f"   🌐 Приложение доступно по: http://app.$ID.$PROXY:8181")
+                    
+                else:
+                    print(f"      ❌ Ошибка деплоя!")
+                    print(f"         {deploy_result.stderr if deploy_result.stderr else deploy_result.stdout}")
+                    self._update_github_status(payload, "failure", "Ошибка деплоя")
+                    return
 
-                # Только если тесты прошли - запускаем деплой
-                print(f"      - Запуск деплоя...")
-                subprocess.run(
-                    ["./deploy.sh"],
-                    cwd=tmpdir,
-                    check=True
-                )
-                print(f"      ✅ Деплой завершен успешно!")
+            else:
+                print(f"      ❌ Тесты упали! Деплой отменен.")
+                print(f"         {test_result.stderr if test_result.stderr else test_result.stdout}")
+                self._update_github_status(payload, "failure", "Тесты не прошли")
+                print(f"   🚫 Pull отклонен из-за неудачных тестов")
 
-            except subprocess.CalledProcessError as e:
-                print(f"      ❌ Тесты упали! Деплой ОТМЕНЕН")
-                print(f"         {e.stdout if e.stdout else 'Нет вывода'}")
-                if e.stderr:
-                    print(f"         Ошибка: {e.stderr}")
-                return
-
+        except Exception as e:
+            print(f"      ❌ Неожиданная ошибка: {e}")
+            self._update_github_status(payload, "error", f"Неожиданная ошибка: {e}")
 
     def _handle_pr_event(self, payload):
-        """Обработка Pull Request события"""
         action = payload.get('action', '')
         pr_number = payload.get('pull_request', {}).get('number', '')
         title = payload.get('pull_request', {}).get('title', '')
@@ -174,20 +242,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
         print(f"   📋 Заголовок: {title}")
 
     def _handle_release_event(self, payload):
-        """Обработка Release события"""
         action = payload.get('action', '')
         tag_name = payload.get('release', {}).get('tag_name', '')
 
         print(f"   🏷️  Release {tag_name}: {action}")
 
 def main():
-    """Запуск webhook сервера"""
-
     print(f"🚀 Запуск DevOps Webhook Demo Server")
     print(f"📡 Порт: {PORT}")
     print(f"🌐 URL: http://0.0.0.0:{PORT}")
     print(f"🔧 Webhook URL: http://0.0.0.0:{PORT}/webhook")
     print(f"⏰ Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    if GITHUB_TOKEN:
+        print(f"🔗 GitHub Status: ✅ Включено")
+    else:
+        print(f"🔗 GitHub Status: ❌ Выключено (установи GITHUB_TOKEN для обратной связи)")
+    
     print(f"\n👀 Ожидание webhook событий от GitHub...")
     print(f"💡 Для остановки: Ctrl+C\n")
 
